@@ -117,8 +117,10 @@ class Reversibility(object):
         N = N_P+N_S
         Q_double_prime = fixed_conc**(N_P-N_S)
         RI = (keq*Q_double_prime)**(2/N)
-        RI = dict(zip(reaction_list, RI))
-        RI = {k:v for k,v in RI.iteritems() if v not in [np.nan, np.inf, -np.inf]}
+        RI = pd.DataFrame(index=reaction_list, columns=['RI'], data=RI)
+        RI.replace([np.inf, -np.inf], np.nan, inplace=True)
+        RI.dropna(inplace=True)
+#        RI = {k:v for k,v in RI.iteritems() if v not in [np.nan, np.inf, -np.inf]}
         return RI
         
 def test():
@@ -129,4 +131,7 @@ def test():
     RI = REV.reaction2RI(reactions)
     return RI
 
-test()
+RI = test()
+
+#import matplotlib.pyplot as plt
+#plt.hist(np.log10(np.array(RI.values())))
