@@ -1,4 +1,5 @@
 import pandas as pd
+import numpy as np
 import sys, os
 from cobra.io.sbml import create_cobra_model_from_sbml_file
 from copy import deepcopy
@@ -81,8 +82,13 @@ class Reversibility(object):
 
     def reaction2dG0(self,reaction_list):
         
-        CC_CACHE_FNAME = os.path.expanduser('../component-contribution/cache/component_contribution.mat')
-        cc = ComponentContribution.from_matfile(CC_CACHE_FNAME)
+        CC_FNAME = os.path.expanduser('../component-contribution/cache/component_contribution.mat')
+
+        if not os.path.exists(CC_FNAME):
+            cc = ComponentContribution()
+            cc.save_matfile(CC_FNAME)
+
+        cc = ComponentContribution.from_matfile(CC_FNAME)
 
         reaction_strings = self.reaction2string(reaction_list)            
         reactions = []
@@ -98,15 +104,29 @@ class Reversibility(object):
         dG0_prime, dG0_std = Kmodel.get_transformed_dG0(pH=7.5, I=0.2, T=298.15)
         return dG0_prime, dG0_std
         
-model_fname = "data/iJO1366.xml"
-model = create_cobra_model_from_sbml_file(model_fname)
-REV = Reversibility(model)
-reactions = model.reactions[1100:1102]
-#print REV.metabolite2cid(model.metabolites[5:10])
-#print REV.reaction2string(reactions)
-print REV.reaction2dG0(reactions)
-#def get_reaction_strings(reactions):
-#for key, val in reaction_strings.iteritems():    
-#    reactions.append(key)
-#    reac_strings.append(val)
-#    
+    def reaction2Keq(self,reaction_list):
+        dG0_prime, dG0_std = self.reaction2dG0(reaction_list)
+        dG0 = np.array(map(lambda x: x[0,0], dG0_prime))
+        return dict(zip(reaction_list, np.exp(-dG0/(R*default_T))))
+            
+    def reaction2RI(self, reaction_list, fixed_conc=0.1):
+        keq = self.reaction2Keq(reaction_list)
+        keq = np.array([keq[r] if r in keq else np.nan for r in reaction_list])
+        N_P = np.array(map(lambda x: len(x.products), reaction_list))
+        N_S = np.array(map(lambda x: len(x.reactants), reaction_list))
+        N = N_P+N_S
+        Q_double_prime = fixed_conc**(N_P-N_S)
+        RI = (keq*Q_double_prime)**(2/N)
+        RI = dict(zip(reaction_list, RI))
+        RI = {k:v for k,v in RI.iteritems() if v not in [np.nan, np.inf, -np.inf]}
+        return RI
+        
+def test():
+    model_fname = "data/iJO1366.xml"
+    model = create_cobra_model_from_sbml_file(model_fname)
+    REV = Reversibility(model)
+    reactions = model.reactions
+    RI = REV.reaction2RI(reactions)
+    return RI
+
+test()
