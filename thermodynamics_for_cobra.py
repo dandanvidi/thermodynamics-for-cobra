@@ -156,15 +156,15 @@ def test():
     model_fname = "data/iJO1366.xml"
     model = create_cobra_model_from_sbml_file(model_fname)
     TFC = THERMODYNAMICS_FOR_COBRA(model)
-    reactions = map(model.reactions.get_by_id, ['MDH', 'FBA'])
+    reactions = map(model.reactions.get_by_id, ['MDH', 'FBA', 'FBP'])
 
     STR = TFC.reaction2string(reactions)
     dG0 = TFC.reaction2dG0(reactions)
     Keq = TFC.reaction2Keq(reactions)
     RI  = TFC.reaction2RI(reactions)
-    return CID, STR, dG0, Keq, RI
+    return STR, dG0, Keq, RI
 
-CID, STR, dG0, Keq, RI = test()
+STR, dG0, Keq, RI = test()
 #RI = {k.id:v for k, v in RI.iteritems()}
 
 #import matplotlib.pyplot as plt
