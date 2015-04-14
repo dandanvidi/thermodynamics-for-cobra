@@ -55,7 +55,7 @@ class THERMODYNAMICS_FOR_COBRA(object):
             For example: "2 C19610 + C00027 + 2 C00080 <=> 2 C19611 + 2 C00001"
             
             Arguments:
-                List of model reaction ids
+                List of model reaction objects
             Returns:
                 Reaction strings
         '''
@@ -83,6 +83,18 @@ class THERMODYNAMICS_FOR_COBRA(object):
 
     def reaction2dG0(self,reaction_list):
 
+        '''
+            Calculates the dG0 of a list of a reaction.
+            Uses the component-contribution package (Noor et al) to estimate
+            the gstandard Gibbs Free Energy of reactions based on 
+            component contribution  approach and measured values (NIST and Alberty)
+            
+            Arguments:
+                List of cobra model reaction objects
+            Returns:
+                Array of dG0 values and standard deviation of estimates
+        '''
+
         cc = ComponentContribution.init()
         
         reaction_strings = self.reaction2string(reaction_list)            
@@ -101,10 +113,34 @@ class THERMODYNAMICS_FOR_COBRA(object):
         return dG0_prime, dG0_std
         
     def reaction2Keq(self,reaction_list):
+        '''
+            Calculates the equilibrium constants of a reaction, using dG0.
+            
+            Arguments:
+                List of cobra model reaction objects
+            Returns:
+                Array of K-equilibrium values
+        '''
         dG0_prime, dG0_std = self.reaction2dG0(reaction_list)
         return np.exp( -dG0_prime / (R*default_T) )
             
     def reaction2RI(self, reaction_list, fixed_conc=0.1):
+
+        '''
+            Calculates the reversibility index (RI) of a reaction.
+            The RI represent the change in concentrations of metabolites
+            (from equal reaction reactants) that will make the reaction reversible.
+            That is, the higher RI is, the more irreversible the reaction.
+            A convenient threshold for reversibility is RI>=1000, that is a change of
+            1000% in metabolite concentrations is required in ordeer to flip the
+            reaction direction. 
+            
+            Arguments:
+                List of cobra model reaction objects
+            Returns:
+                Array of RI values
+        '''
+
 
         keq = self.reaction2Keq(reaction_list)
 
