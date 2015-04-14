@@ -19,7 +19,7 @@ class THERMODYNAMICS_FOR_COBRA(object):
 
         self.model = deepcopy(model)
         
-        '''map model metabolites to kegg CIDs'''
+        '''mapping file with model metabolites and kegg CIDs'''
         self.metabolites = pd.DataFrame.from_csv("data/metaboliteList.txt", sep='\t')
         self.metabolites.drop(['cas_id', 'Unnamed: 8'], axis=1, inplace=True)
 #        self.metabolites.set_index('name', inplace=True)
@@ -57,9 +57,7 @@ class THERMODYNAMICS_FOR_COBRA(object):
             Arguments:
                 List of model reaction ids
             Returns:
-                Dictionary:
-                    keys - reaction ids
-                    values - reaction strings
+                Reaction strings
         '''
 
         sparse = {}
@@ -113,9 +111,7 @@ class THERMODYNAMICS_FOR_COBRA(object):
         N_P = np.array(map(lambda x: len(x.products), reaction_list))
         N_S = np.array(map(lambda x: len(x.reactants), reaction_list))        
         N = N_P + N_S
-        print N_P, N_S, N
         Q_2prime = fixed_conc**(N_P-N_S)
-        print Q_2prime
         
         RI = ( keq*Q_2prime )**( 2.0/N )
         return RI
