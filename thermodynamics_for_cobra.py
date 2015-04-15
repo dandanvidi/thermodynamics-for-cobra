@@ -1,13 +1,20 @@
+'''
+
+Requirements:
+
+1 . uncertainties package - http://packages.python.org/uncertainties/index.html
+2 . 
+
+'''
 import pandas as pd
 import numpy as np
-import sys, os
+import uncertainties.unumpy as unumpy  
 from cobra.io.sbml import create_cobra_model_from_sbml_file
 from copy import deepcopy
 from component_contribution.kegg_reaction import KeggReaction
 from component_contribution.kegg_model import KeggModel
 from component_contribution.component_contribution import ComponentContribution
-
-from python.thermodynamic_constants import R, default_T
+from component_contribution.thermodynamic_constants import R, default_T
 
 class THERMODYNAMICS_FOR_COBRA(object):
 
@@ -24,88 +31,70 @@ class THERMODYNAMICS_FOR_COBRA(object):
         self.metabolites.drop(['cas_id', 'Unnamed: 8'], axis=1, inplace=True)
 #        self.metabolites.set_index('name', inplace=True)
         
-    def metabolite2cid(self, metabolite_list):
+    def _metabolite2cid(self, metabolite_list):
         '''
-            map COBRA metabolite objects to KEGG CIDs
+            map COBRA metabolite to KEGG CIDs
             
             Arguments:
-                List of metabolite objects
+                List of metabolite ids
             Returns:
-                Dictionary:
-                    keys - metabolites
-                    values - cids
+                List of KEGG cids
         '''
-        out = {}
+        CIDS = []
         for m in metabolite_list:
-            key = m.id[:-2] #remove '_c' from compound name
             try:
-                cid = self.metabolites.kegg_id[key]
-                out[m] = cid
+                CIDS.append(self.metabolites.kegg_id[m[:-2].replace('_', '-')])
             except:
-                try:
-                    cid = self.metabolites.kegg_id[key.replace('_', '-')]
-                    out[m] = cid
-                except:
-                    out[m] = 'not mapped : %s' %m.id
-        return out
+                CIDS.append('%s:not mapped' %m)
+        return CIDS
         
-    def reaction2string(self, reaction_list):
+    def _reaction2string(self, reaction_list):
         '''
-            map COBRA reactions to reactions strings with compound as KEGG cids
-            For example: "2 C19610 + C00027 + 2 C00080 <=> 2 C19611 + 2 C00001"
+            map COBRA reactions to reactions strings with KEGG cids, e.g.,
+            "2 C19610 + C00027 + 2 C00080 <=> 2 C19611 + 2 C00001"
             
             Arguments:
-                List of model reaction objects
+                List of model reaction ids
             Returns:
                 Reaction strings
         '''
-
-        sparse = {}
-        reaction_strings = {}
+        reaction_strings = []
         for r in reaction_list:
-            cids = self.metabolite2cid(r.metabolites)
-            sparse = {cids[m]:v for m,v in r.metabolites.iteritems()}
-#            assert len(sparse) == len(r.metabolites), 'False reactants mapping!'
+
+            reactants = map(lambda x: x.id, r.metabolites)
+            reactant2cid = dict(zip(reactants, self._metabolite2cid(reactants)))
+            sparse = {reactant2cid[m.id]:v for m,v in r.metabolites.iteritems()}
                 
-            # remove protons (H+) from reaction 
-            #since not relevant for dG calculations
+            # remove protons (H+) from reactions
             if 'C00080' in sparse:
                 del sparse['C00080']            
                 
             assert r not in reaction_strings, 'Duplicate reaction!'
 
             try:
-                kegg_reaction = KeggReaction(sparse)
-                reaction_strings[r] = str(kegg_reaction)
+                reaction_strings.append(str(KeggReaction(sparse)))
             except TypeError: 
+                print sparse
                 continue
         return reaction_strings
 
-    def reaction2dG0(self,reaction_list):
-
+    def reaction2dG0(self,reaction_list=[]):
         '''
             Calculates the dG0 of a list of a reaction.
             Uses the component-contribution package (Noor et al) to estimate
-            the gstandard Gibbs Free Energy of reactions based on 
+            the standard Gibbs Free Energy of reactions based on 
             component contribution  approach and measured values (NIST and Alberty)
             
             Arguments:
-                List of cobra model reaction objects
+                List of cobra model reaction ids
             Returns:
                 Array of dG0 values and standard deviation of estimates
         '''
-
         cc = ComponentContribution.init()
         
-        reaction_strings = self.reaction2string(reaction_list)            
-        reactions = []
-        reac_strings = []
-        for r, string in reaction_strings.iteritems():
-#            if 'not mapped' not in string:
-            reactions.append(r)
-            reac_strings.append(string)
-            
-        Kmodel = KeggModel.from_formulas(reac_strings)
+        reaction_strings = self._reaction2string(reaction_list)
+        Kmodel = KeggModel.from_formulas(reaction_strings)
+        Kmodel = KeggModel.from_formulas(reaction_strings)
         Kmodel.add_thermo(cc)
         dG0_prime, dG0_std = Kmodel.get_transformed_dG0(pH=7.5, I=0.2, T=298.15)
         dG0_prime = np.array(map(lambda x: x[0,0], dG0_prime))
@@ -117,15 +106,19 @@ class THERMODYNAMICS_FOR_COBRA(object):
             Calculates the equilibrium constants of a reaction, using dG0.
             
             Arguments:
-                List of cobra model reaction objects
+                List of cobra model reaction ids
             Returns:
                 Array of K-equilibrium values
         '''
         dG0_prime, dG0_std = self.reaction2dG0(reaction_list)
-        return np.exp( -dG0_prime / (R*default_T) )
+        
+        # error propagation
+        udG0 = unumpy.uarray(dG0_prime, np.diag(dG0_std))             
+        Keq = unumpy.exp( -udG0 / (R*default_T) )
+
+        return Keq
             
     def reaction2RI(self, reaction_list, fixed_conc=0.1):
-
         '''
             Calculates the reversibility index (RI) of a reaction.
             The RI represent the change in concentrations of metabolites
@@ -139,33 +132,46 @@ class THERMODYNAMICS_FOR_COBRA(object):
                 List of cobra model reaction objects
             Returns:
                 Array of RI values
-        '''
-
-
+    '''
         keq = self.reaction2Keq(reaction_list)
+        
+#        reaction_strings = self._reaction2string(reaction_list)
+        sparse = map(lambda x: x.metabolites, reaction_list)
 
-        N_P = np.array(map(lambda x: len(x.products), reaction_list))
-        N_S = np.array(map(lambda x: len(x.reactants), reaction_list))        
+        N_P = np.zeros(len(sparse))
+        N_S = np.zeros(len(sparse))    
+        for i,s in enumerate(sparse):   
+            N_P[i] = sum([v for v in s.itervalues() if v>0])
+            N_S[i] = -sum([v for v in s.itervalues() if v<0])
+
         N = N_P + N_S
         Q_2prime = fixed_conc**(N_P-N_S)
         
         RI = ( keq*Q_2prime )**( 2.0/N )
         return RI
         
-def test():
+if __name__ == "__main__":
+    
     model_fname = "data/iJO1366.xml"
     model = create_cobra_model_from_sbml_file(model_fname)
     TFC = THERMODYNAMICS_FOR_COBRA(model)
-    reactions = map(model.reactions.get_by_id, ['MDH', 'FBA', 'FBP'])
 
-    STR = TFC.reaction2string(reactions)
-    dG0 = TFC.reaction2dG0(reactions)
+    reactions = ['MDH', 'FBA', 'TPI', 'FBP', 'PGM', 'SERAT', 'TMDS', 'DBTS', 
+                 'CS', 'BTS5', 'ENO', 'PANTS', 'METAT', 'PANTS']
+    reactions = map(model.reactions.get_by_id, reactions)
+#    reactions = model.reactions
+    
+    strings = TFC._reaction2string(reactions)
+    dG0, std = TFC.reaction2dG0(reactions)    
     Keq = TFC.reaction2Keq(reactions)
-    RI  = TFC.reaction2RI(reactions)
-    return STR, dG0, Keq, RI
+#    RI  = TFC.reaction2RI(reactions)
 
-STR, dG0, Keq, RI = test()
-#RI = {k.id:v for k, v in RI.iteritems()}
-
-#import matplotlib.pyplot as plt
-#plt.hist(np.log10(np.array(RI.values())))
+#    import matplotlib.pyplot as plt
+#    x = unumpy.nominal_values(RI)
+#    xerr = unumpy.std_devs(RI)
+#    fig = plt.figure()
+#    plt.hist(np.log10(x), cumulative=True, histtype='step', normed=True)
+#    plt.scatter(np.arange(len(x))+1, x, s=100, alpha=0.5)
+#    plt.yscale('log')
+#    plt.ylim(1e-5, 1e5)    
+#    plt.xlim(0, len(x)+1)    
