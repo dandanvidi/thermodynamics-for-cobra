@@ -32,6 +32,10 @@ class THERMODYNAMICS_FOR_COBRA(object):
         self.metabolites.drop(['cas_id', 'Unnamed: 8'], axis=1, inplace=True)
 #        self.metabolites.set_index('name', inplace=True)
         
+        self.reaction_sparses, self.reaction_strings = self._reaction2string()
+        self.cc = ComponentContribution.init()
+        self.udG0_prime = self.reaction2udG0_prime()
+        
     def _metabolite2cid(self, metabolite_list):
         '''
             map COBRA metabolite to KEGG CIDs
@@ -102,7 +106,7 @@ class THERMODYNAMICS_FOR_COBRA(object):
 
         return reaction_sparses, reaction_strings
 
-    def reaction2dG0(self):
+    def reaction2udG0_prime(self):
         '''
             Calculates the dG0 of a list of a reaction.
             Uses the component-contribution package (Noor et al) to estimate
@@ -114,16 +118,14 @@ class THERMODYNAMICS_FOR_COBRA(object):
             Returns:
                 Array of dG0 values and standard deviation of estimates
         '''
-        cc = ComponentContribution.init()
         
-        reaction_sparses, reaction_strings = self._reaction2string()
-        Kmodel = KeggModel.from_formulas(reaction_strings)
-        Kmodel.add_thermo(cc)
-        dG0_prime, dG0_std = Kmodel.get_transformed_dG0(pH=7.5, I=0.2, T=298.15)
-        
-        return dG0_prime, dG0_std
-        
-    def reaction2Keq(self):
+        Kmodel = KeggModel.from_formulas(self.reaction_strings)
+        Kmodel.add_thermo(self.cc)
+        dG0_prime, dG0_cov = Kmodel.get_transformed_dG0(pH=7.5, I=0.2, T=298.15)
+        dG0_std = 1.96*np.diag(dG0_cov.round(1))
+        return unumpy.uarray( (dG0_prime.flat, dG0_std.flat) )
+
+    def reaction2logKeq(self):
         '''
             Calculates the equilibrium constants of a reaction, using dG0.
             
@@ -132,22 +134,12 @@ class THERMODYNAMICS_FOR_COBRA(object):
             Returns:
                 Array of K-equilibrium values
         '''
-        dG0_prime, dG0_std = self.reaction2dG0()
         
-#        print dG0_prime
-               
-        # error propagation
-        dG0_std = np.matrix([x if x>0 else 0 for x in np.diag(dG0_std)]).T
-        Keq = unumpy.umatrix(np.zeros(len(dG0_prime)), np.zeros(len(dG0_prime)))
-        
-        for i, (dG0, std) in enumerate(zip(dG0_prime, dG0_std)):
-             udG0 = unumpy.uarray(dG0[0,0], std[0,0])
-             try:                 
-                 k = unumpy.exp( -udG0 / (R*default_T) ).max()
-             except OverflowError:
-                 k = 10**80 #value to bit to use exponent
-             Keq[0,i] = k
-        return Keq
+        # cap the maximal dG0 at 200
+        tmp = self.udG0_prime
+        tmp[tmp > 200] = 200
+        tmp[tmp < -200] = -200
+        return -tmp / (R*default_T)
             
     def reaction2RI(self, fixed_conc=0.1):
         '''
@@ -164,21 +156,18 @@ class THERMODYNAMICS_FOR_COBRA(object):
             Returns:
                 Array of RI values
     '''
-        reaction_sparses, reaction_strings = self._reaction2string()
-        N_P = np.zeros(len(reaction_sparses))
-        N_S = np.zeros(len(reaction_sparses))
+        N_P = np.zeros(len(self.reaction_sparses))
+        N_S = np.zeros(len(self.reaction_sparses))
         
-        for i,sparse in enumerate(reaction_sparses):   
-            N_P[i] = sum([v for v in sparse.itervalues() if v>0])
-            N_S[i] = -sum([v for v in sparse.itervalues() if v<0])
+        for i, sparse in enumerate(self.reaction_sparses):   
+            N_P[i] = sum([v  for v in sparse.itervalues() if v > 0])
+            N_S[i] = sum([-v for v in sparse.itervalues() if v < 0])
 
         N = N_P + N_S
-        Q_2prime = np.matrix(fixed_conc**(N_P-N_S))
-        Keq = self.reaction2Keq()
-
-        RI = np.power( np.multiply(Keq,Q_2prime) , 2.0/N )
+        logKeq = self.reaction2logKeq()
+        logRI = (2/N) * (logKeq + (N_P - N_S)*np.log(fixed_conc))
         
-        return RI
+        return logRI
         
 if __name__ == "__main__":
     
@@ -190,10 +179,8 @@ if __name__ == "__main__":
                  
     reactions = map(lambda x: x.id, model.reactions)
     TFC = THERMODYNAMICS_FOR_COBRA(model, reactions)
-    sparses, strings = TFC._reaction2string()
-    dG0, std = TFC.reaction2dG0()    
-    Keq = TFC.reaction2Keq()
-    RI  = TFC.reaction2RI()
+    logKeq = TFC.reaction2logKeq()
+    logRI  = TFC.reaction2RI()
 
 #    import matplotlib.pyplot as plt
 #    x = unumpy.nominal_values(RI)
