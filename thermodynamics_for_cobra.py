@@ -3,9 +3,9 @@
 Requirements:
 
 1 . uncertainties package - http://packages.python.org/uncertainties/index.html
-2 . 
 
 '''
+import warnings
 import pandas as pd
 import numpy as np
 import uncertainties.unumpy as unumpy  
@@ -18,13 +18,14 @@ from component_contribution.thermodynamic_constants import R, default_T
 
 class THERMODYNAMICS_FOR_COBRA(object):
 
-    def __init__(self, model):
+    def __init__(self, model, reaction_list):
 
         self.pH = 7.5
         self.I = 0.2
         self.T = default_T
-
-        self.model = deepcopy(model)
+        
+        self.model = deepcopy(model)        
+        self.reactions = reaction_list
         
         '''mapping file with model metabolites and kegg CIDs'''
         self.metabolites = pd.DataFrame.from_csv("data/metaboliteList.txt", sep='\t')
@@ -44,11 +45,12 @@ class THERMODYNAMICS_FOR_COBRA(object):
         for m in metabolite_list:
             try:
                 CIDS.append(self.metabolites.kegg_id[m[:-2].replace('_', '-')])
-            except:
-                CIDS.append('%s:not mapped' %m)
+            except KeyError:
+                warnings.warn("%s can not be mapped to kegg" %m)
+                CIDS.append(None)
         return CIDS
         
-    def _reaction2string(self, reaction_list):
+    def _reaction2string(self):
         '''
             map COBRA reactions to reactions strings with KEGG cids, e.g.,
             "2 C19610 + C00027 + 2 C00080 <=> 2 C19611 + 2 C00001"
@@ -58,27 +60,49 @@ class THERMODYNAMICS_FOR_COBRA(object):
             Returns:
                 Reaction strings
         '''
+        reaction_list = map(self.model.reactions.get_by_id, self.reactions)        
         reaction_strings = []
-        for r in reaction_list:
+        reaction_sparses = []        
+        indices = set()        
+        
+        for i, r in enumerate(reaction_list):
 
-            reactants = map(lambda x: x.id, r.metabolites)
-            reactant2cid = dict(zip(reactants, self._metabolite2cid(reactants)))
+            metabolites = map(lambda x: x.id, r.metabolites)
+            CIDS = self._metabolite2cid(metabolites)
+    
+            # if not all reactants could be mapped to kegg CIDS, 
+            #return empty reaction string
+            if None in CIDS:
+                indices.add(i)
+                warnings.warn("%s was removed from reaction_list. " %r.id +
+                                "see class reactions for updated list" )
+                continue
+            
+            reactant2cid = dict(zip(metabolites, CIDS))            
             sparse = {reactant2cid[m.id]:v for m,v in r.metabolites.iteritems()}
                 
             # remove protons (H+) from reactions
             if 'C00080' in sparse:
                 del sparse['C00080']            
-                
+                            
             assert r not in reaction_strings, 'Duplicate reaction!'
 
             try:
-                reaction_strings.append(str(KeggReaction(sparse)))
+                kegg_reaction = KeggReaction(sparse)
+                if kegg_reaction.is_balanced():
+                    reaction_strings.append(str(KeggReaction(sparse)))
+                    reaction_sparses.append(sparse)
+                else:
+                    indices.add(i)
             except TypeError: 
-                print sparse
-                continue
-        return reaction_strings
+                warnings.warn("%s not be converted to reaction string" %str(sparse))
 
-    def reaction2dG0(self,reaction_list=[]):
+        for i in sorted(indices, reverse=True):
+            del self.reactions[i]
+
+        return reaction_sparses, reaction_strings
+
+    def reaction2dG0(self):
         '''
             Calculates the dG0 of a list of a reaction.
             Uses the component-contribution package (Noor et al) to estimate
@@ -92,16 +116,14 @@ class THERMODYNAMICS_FOR_COBRA(object):
         '''
         cc = ComponentContribution.init()
         
-        reaction_strings = self._reaction2string(reaction_list)
-        Kmodel = KeggModel.from_formulas(reaction_strings)
+        reaction_sparses, reaction_strings = self._reaction2string()
         Kmodel = KeggModel.from_formulas(reaction_strings)
         Kmodel.add_thermo(cc)
         dG0_prime, dG0_std = Kmodel.get_transformed_dG0(pH=7.5, I=0.2, T=298.15)
-        dG0_prime = np.array(map(lambda x: x[0,0], dG0_prime))
         
         return dG0_prime, dG0_std
         
-    def reaction2Keq(self,reaction_list):
+    def reaction2Keq(self):
         '''
             Calculates the equilibrium constants of a reaction, using dG0.
             
@@ -110,15 +132,24 @@ class THERMODYNAMICS_FOR_COBRA(object):
             Returns:
                 Array of K-equilibrium values
         '''
-        dG0_prime, dG0_std = self.reaction2dG0(reaction_list)
+        dG0_prime, dG0_std = self.reaction2dG0()
         
+#        print dG0_prime
+               
         # error propagation
-        udG0 = unumpy.uarray(dG0_prime, np.diag(dG0_std))             
-        Keq = unumpy.exp( -udG0 / (R*default_T) )
-
+        dG0_std = np.matrix([x if x>0 else 0 for x in np.diag(dG0_std)]).T
+        Keq = unumpy.umatrix(np.zeros(len(dG0_prime)), np.zeros(len(dG0_prime)))
+        
+        for i, (dG0, std) in enumerate(zip(dG0_prime, dG0_std)):
+             udG0 = unumpy.uarray(dG0[0,0], std[0,0])
+             try:                 
+                 k = unumpy.exp( -udG0 / (R*default_T) ).max()
+             except OverflowError:
+                 k = 10**80 #value to bit to use exponent
+             Keq[0,i] = k
         return Keq
             
-    def reaction2RI(self, reaction_list, fixed_conc=0.1):
+    def reaction2RI(self, fixed_conc=0.1):
         '''
             Calculates the reversibility index (RI) of a reaction.
             The RI represent the change in concentrations of metabolites
@@ -133,38 +164,36 @@ class THERMODYNAMICS_FOR_COBRA(object):
             Returns:
                 Array of RI values
     '''
-        keq = self.reaction2Keq(reaction_list)
+        reaction_sparses, reaction_strings = self._reaction2string()
+        N_P = np.zeros(len(reaction_sparses))
+        N_S = np.zeros(len(reaction_sparses))
         
-#        reaction_strings = self._reaction2string(reaction_list)
-        sparse = map(lambda x: x.metabolites, reaction_list)
-
-        N_P = np.zeros(len(sparse))
-        N_S = np.zeros(len(sparse))    
-        for i,s in enumerate(sparse):   
-            N_P[i] = sum([v for v in s.itervalues() if v>0])
-            N_S[i] = -sum([v for v in s.itervalues() if v<0])
+        for i,sparse in enumerate(reaction_sparses):   
+            N_P[i] = sum([v for v in sparse.itervalues() if v>0])
+            N_S[i] = -sum([v for v in sparse.itervalues() if v<0])
 
         N = N_P + N_S
-        Q_2prime = fixed_conc**(N_P-N_S)
+        Q_2prime = np.matrix(fixed_conc**(N_P-N_S))
+        Keq = self.reaction2Keq()
+
+        RI = np.power( np.multiply(Keq,Q_2prime) , 2.0/N )
         
-        RI = ( keq*Q_2prime )**( 2.0/N )
         return RI
         
 if __name__ == "__main__":
     
     model_fname = "data/iJO1366.xml"
     model = create_cobra_model_from_sbml_file(model_fname)
-    TFC = THERMODYNAMICS_FOR_COBRA(model)
 
     reactions = ['MDH', 'FBA', 'TPI', 'FBP', 'PGM', 'SERAT', 'TMDS', 'DBTS', 
-                 'CS', 'BTS5', 'ENO', 'PANTS', 'METAT', 'PANTS']
-    reactions = map(model.reactions.get_by_id, reactions)
-#    reactions = model.reactions
-    
-    strings = TFC._reaction2string(reactions)
-    dG0, std = TFC.reaction2dG0(reactions)    
-    Keq = TFC.reaction2Keq(reactions)
-#    RI  = TFC.reaction2RI(reactions)
+                 'CS', 'BTS5', 'ENO', 'PANTS', 'METAT', 'GND', 'PGI']
+                 
+    reactions = map(lambda x: x.id, model.reactions)
+    TFC = THERMODYNAMICS_FOR_COBRA(model, reactions)
+    sparses, strings = TFC._reaction2string()
+    dG0, std = TFC.reaction2dG0()    
+    Keq = TFC.reaction2Keq()
+    RI  = TFC.reaction2RI()
 
 #    import matplotlib.pyplot as plt
 #    x = unumpy.nominal_values(RI)
